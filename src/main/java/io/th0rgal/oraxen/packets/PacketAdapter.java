@@ -34,8 +34,10 @@ public interface PacketAdapter {
     void registerInventoryListener();
     void registerScoreboardListener();
     void registerTitleListener();
+    void registerPickItemListener();
     void removeInventoryListener();
     void removeTitleListener();
+    void removePickItemListener();
 
     String getLatestMCVersion();
     boolean isNewer(SnapshotVersion snapshot);
@@ -72,6 +74,14 @@ public interface PacketAdapter {
         @Override
         public void removeTitleListener() {
 
+        }
+
+        @Override
+        public void registerPickItemListener() {
+        }
+
+        @Override
+        public void removePickItemListener() {
         }
 
         @Override public String getLatestMCVersion() {

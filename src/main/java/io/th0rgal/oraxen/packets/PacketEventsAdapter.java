@@ -7,6 +7,7 @@ import com.github.retrooper.packetevents.event.PacketListenerPriority;
 import com.github.retrooper.packetevents.manager.server.ServerVersion;
 import io.th0rgal.oraxen.OraxenPlugin;
 import io.th0rgal.oraxen.packets.packetevents.InventoryPacketListener;
+import io.th0rgal.oraxen.packets.packetevents.PickItemPacketListener;
 import io.th0rgal.oraxen.packets.packetevents.ScoreboardPacketListener;
 import io.th0rgal.oraxen.packets.packetevents.TitlePacketListener;
 import io.th0rgal.oraxen.utils.SnapshotVersion;
@@ -18,6 +19,7 @@ public class PacketEventsAdapter implements PacketAdapter {
 
     private PacketListenerCommon titlePacketListener;
     private PacketListenerCommon inventoryPacketListener;
+    private PacketListenerCommon pickItemPacketListener;
 
     @Override
     public boolean isEnabled() {
@@ -52,6 +54,15 @@ public class PacketEventsAdapter implements PacketAdapter {
     }
 
     @Override
+    public void registerPickItemListener() {
+        if (pickItemPacketListener != null) {
+            OraxenPlugin.get().getLogger().severe("[PacketEventsAdapter]: Pick Item Listener is already registered!");
+            return;
+        }
+        pickItemPacketListener = register(new PickItemPacketListener(), PacketListenerPriority.LOW);
+    }
+
+    @Override
     public void removeInventoryListener() {
         if(inventoryPacketListener != null)
             PacketEvents.getAPI().getEventManager().unregisterListener(inventoryPacketListener);
@@ -63,6 +74,13 @@ public class PacketEventsAdapter implements PacketAdapter {
         if(titlePacketListener != null)
             PacketEvents.getAPI().getEventManager().unregisterListener(titlePacketListener);
         titlePacketListener = null;
+    }
+
+    @Override
+    public void removePickItemListener() {
+        if (pickItemPacketListener != null)
+            PacketEvents.getAPI().getEventManager().unregisterListener(pickItemPacketListener);
+        pickItemPacketListener = null;
     }
 
     @Override
