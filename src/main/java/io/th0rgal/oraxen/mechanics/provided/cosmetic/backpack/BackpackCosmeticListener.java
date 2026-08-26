@@ -48,8 +48,6 @@ public class BackpackCosmeticListener implements Listener {
     private final Map<UUID, StandDisplayData> armorStandDisplays = new ConcurrentHashMap<>();
     private final Map<UUID, SchedulerUtil.ScheduledTask> armorStandViewerTasks = new ConcurrentHashMap<>();
 
-    private static final int armorStandScanDistance = 128;
-
     // Movement thresholds to reduce unnecessary updates
     // Without mount packets, we need more frequent updates for smooth following
     private static final double POSITION_THRESHOLD = 0.01;
@@ -167,7 +165,7 @@ public class BackpackCosmeticListener implements Listener {
     public void onArmorStandManipulate(PlayerArmorStandManipulateEvent event) {
         ArmorStand stand = event.getRightClicked();
         Player player = event.getPlayer();
-        if (event.getSlot() != EquipmentSlot.CHEST) return;
+        if (!factory.isArmorStandEnabled() || event.getSlot() != EquipmentSlot.CHEST) return;
 
         SchedulerUtil.runForEntityLater(stand, 1L, () -> checkArmorStandDisplay(stand));
         SchedulerUtil.runForEntityLater(player, 2L, () -> refreshArmorStandDisplays(player));
@@ -253,7 +251,7 @@ public class BackpackCosmeticListener implements Listener {
     }
 
     private void handleArmorStandMountChange(Entity vehicle) {
-        if (!(vehicle instanceof ArmorStand stand)) return;
+        if (!factory.isArmorStandEnabled() || !(vehicle instanceof ArmorStand stand)) return;
 
         StandDisplayData data = armorStandDisplays.get(stand.getUniqueId());
         if (data == null) return;
@@ -516,12 +514,16 @@ public class BackpackCosmeticListener implements Listener {
     }
 
     void startExistingArmorStandViewerTasks() {
+        if (!factory.isArmorStandEnabled()) return;
+
         for (Player player : Bukkit.getOnlinePlayers()) {
             startArmorStandViewerTask(player);
         }
     }
 
     private void startArmorStandViewerTask(Player viewer) {
+        if (!factory.isArmorStandEnabled()) return;
+
         UUID viewerId = viewer.getUniqueId();
         if (armorStandViewerTasks.containsKey(viewerId)) return;
 
@@ -539,11 +541,12 @@ public class BackpackCosmeticListener implements Listener {
     }
 
     private void refreshArmorStandDisplays(Player viewer) {
-        if (!viewer.isOnline()) return;
+        if (!factory.isArmorStandEnabled() || !viewer.isOnline()) return;
 
+        int armorStandRange = factory.getArmorStandRange();
         Set<UUID> nearbyStandIds = new HashSet<>();
         for (Entity entity : viewer.getNearbyEntities(
-                armorStandScanDistance, armorStandScanDistance, armorStandScanDistance)) {
+                armorStandRange, armorStandRange, armorStandRange)) {
             if (entity instanceof ArmorStand stand) {
                 nearbyStandIds.add(stand.getUniqueId());
                 refreshArmorStandForViewer(viewer, stand);

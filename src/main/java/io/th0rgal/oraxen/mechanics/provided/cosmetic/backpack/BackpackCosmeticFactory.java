@@ -18,7 +18,11 @@ import org.bukkit.configuration.ConfigurationSection;
 public class BackpackCosmeticFactory extends MechanicFactory {
 
     private static BackpackCosmeticFactory instance;
+    private static final String armorStandEnabledKey = "armor_stand_enabled";
+    private static final String armorStandRangeKey = "armor_stand_range";
     private final BackpackCosmeticListener listener;
+    private final boolean armorStandEnabled;
+    private final int armorStandRange;
 
     @ConfigProperty(type = PropertyType.STRING, description = "Equipment slot that triggers backpack display", defaultValue = "CHEST")
     public static final String PROP_SLOT = "slot";
@@ -50,6 +54,8 @@ public class BackpackCosmeticFactory extends MechanicFactory {
     public BackpackCosmeticFactory(ConfigurationSection section) {
         super(section);
         instance = this;
+        armorStandEnabled = section.getBoolean(armorStandEnabledKey, true);
+        armorStandRange = Math.max(1, section.getInt(armorStandRangeKey, 128));
 
         listener = new BackpackCosmeticListener(this);
         MechanicsManager.registerListeners(OraxenPlugin.get(), getMechanicID(), listener,
@@ -73,6 +79,14 @@ public class BackpackCosmeticFactory extends MechanicFactory {
 
     public static BackpackCosmeticFactory getInstance() {
         return instance;
+    }
+
+    public boolean isArmorStandEnabled() {
+        return armorStandEnabled;
+    }
+
+    public int getArmorStandRange() {
+        return armorStandRange;
     }
 
     @Override
