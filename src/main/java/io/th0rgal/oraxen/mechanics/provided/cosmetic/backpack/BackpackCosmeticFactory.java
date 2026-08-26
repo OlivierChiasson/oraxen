@@ -18,6 +18,7 @@ import org.bukkit.configuration.ConfigurationSection;
 public class BackpackCosmeticFactory extends MechanicFactory {
 
     private static BackpackCosmeticFactory instance;
+    private final BackpackCosmeticListener listener;
 
     @ConfigProperty(type = PropertyType.STRING, description = "Equipment slot that triggers backpack display", defaultValue = "CHEST")
     public static final String PROP_SLOT = "slot";
@@ -50,20 +51,20 @@ public class BackpackCosmeticFactory extends MechanicFactory {
         super(section);
         instance = this;
 
-        BackpackCosmeticListener listener = new BackpackCosmeticListener(this);
+        listener = new BackpackCosmeticListener(this);
         MechanicsManager.registerListeners(OraxenPlugin.get(), getMechanicID(), listener,
                 listener.createMountListener(OraxenPlugin.get()));
 
-        // Register tasks with MechanicsManager for proper cleanup on reload
         BackpackCosmeticManager manager = BackpackCosmeticManager.getInstance();
 
-        // Fast position update task (every tick = 50ms) for smooth backpack following
         SchedulerUtil.ScheduledTask positionTask = SchedulerUtil.runTaskTimer(1L, 1L, manager::updateAllBackpackPositions);
         MechanicsManager.registerTask(getMechanicID(), positionTask);
 
-        // Viewer refresh task (every 20 ticks = 1 second) for adding/removing viewers
         SchedulerUtil.ScheduledTask refreshTask = SchedulerUtil.runTaskTimer(20L, 20L, manager::refreshAllViewers);
         MechanicsManager.registerTask(getMechanicID(), refreshTask);
+
+        SchedulerUtil.ScheduledTask armorStandTask = SchedulerUtil.runTaskLater(1L, listener::startExistingArmorStandViewerTasks);
+        MechanicsManager.registerTask(getMechanicID(), armorStandTask);
 
         if (Settings.DEBUG.toBool()) {
             io.th0rgal.oraxen.utils.logs.Logs.logSuccess("BackpackCosmeticFactory initialized");
@@ -72,6 +73,11 @@ public class BackpackCosmeticFactory extends MechanicFactory {
 
     public static BackpackCosmeticFactory getInstance() {
         return instance;
+    }
+
+    @Override
+    public void onUnregister() {
+        listener.cleanupArmorStandDisplays();
     }
 
     @Override

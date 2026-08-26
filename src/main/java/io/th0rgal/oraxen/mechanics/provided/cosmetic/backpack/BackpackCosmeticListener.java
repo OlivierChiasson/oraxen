@@ -2,15 +2,21 @@ package io.th0rgal.oraxen.mechanics.provided.cosmetic.backpack;
 
 import io.th0rgal.oraxen.api.OraxenItems;
 import io.th0rgal.oraxen.mechanics.Mechanic;
+import io.th0rgal.oraxen.mechanics.MechanicsManager;
+import io.th0rgal.oraxen.nms.NMSHandlers;
 import io.th0rgal.oraxen.utils.SchedulerUtil;
 import io.th0rgal.oraxen.utils.VersionUtil;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.Location;
+import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.EntityToggleGlideEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
@@ -22,6 +28,8 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.lang.reflect.Method;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -37,6 +45,10 @@ public class BackpackCosmeticListener implements Listener {
     private final BackpackCosmeticManager manager;
     private final Set<UUID> hiddenForMovement = ConcurrentHashMap.newKeySet();
     private final Map<UUID, BackpackCosmeticMechanic> hiddenMovementMechanics = new ConcurrentHashMap<>();
+    private final Map<UUID, StandDisplayData> armorStandDisplays = new ConcurrentHashMap<>();
+    private final Map<UUID, SchedulerUtil.ScheduledTask> armorStandViewerTasks = new ConcurrentHashMap<>();
+
+    private static final int armorStandScanDistance = 128;
 
     // Movement thresholds to reduce unnecessary updates
     // Without mount packets, we need more frequent updates for smooth following
@@ -53,14 +65,28 @@ public class BackpackCosmeticListener implements Listener {
     public void onPlayerJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
 
-        // Check if player has backpack item equipped
-        SchedulerUtil.runForEntityLater(player, 5L, () -> checkAndUpdateBackpack(player));
+        SchedulerUtil.runForEntityLater(player, 5L, () -> {
+            checkAndUpdateBackpack(player);
+            startArmorStandViewerTask(player);
+            refreshArmorStandDisplays(player);
+        });
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerQuit(PlayerQuitEvent event) {
-        clearMovementHidden(event.getPlayer().getUniqueId());
-        manager.hideBackpack(event.getPlayer());
+        Player player = event.getPlayer();
+        UUID playerId = player.getUniqueId();
+        clearMovementHidden(playerId);
+        manager.hideBackpack(player);
+
+        SchedulerUtil.ScheduledTask task = armorStandViewerTasks.remove(playerId);
+        if (task != null) task.cancel();
+        for (StandDisplayData data : armorStandDisplays.values()) {
+            data.viewers.remove(playerId);
+            if (data.viewers.isEmpty()) {
+                armorStandDisplays.remove(data.standId, data);
+            }
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -137,6 +163,23 @@ public class BackpackCosmeticListener implements Listener {
         SchedulerUtil.runForEntityLater(player, 1L, () -> checkAndUpdateBackpack(player));
     }
 
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onArmorStandManipulate(PlayerArmorStandManipulateEvent event) {
+        ArmorStand stand = event.getRightClicked();
+        Player player = event.getPlayer();
+        if (event.getSlot() != EquipmentSlot.CHEST) return;
+
+        SchedulerUtil.runForEntityLater(stand, 1L, () -> checkArmorStandDisplay(stand));
+        SchedulerUtil.runForEntityLater(player, 2L, () -> refreshArmorStandDisplays(player));
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onArmorStandDeath(EntityDeathEvent event) {
+        if (event.getEntity() instanceof ArmorStand stand) {
+            removeArmorStandDisplay(stand.getUniqueId());
+        }
+    }
+
     /**
      * Creates the mount/dismount listener for backpack resyncs.
      * The mount events moved from org.spigotmc to org.bukkit.event.entity in 1.20.5;
@@ -162,11 +205,13 @@ public class BackpackCosmeticListener implements Listener {
         @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
         public void onEntityMount(org.bukkit.event.entity.EntityMountEvent event) {
             handleMountChange(event.getEntity());
+            handleArmorStandMountChange(event.getMount());
         }
 
         @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
         public void onEntityDismount(org.bukkit.event.entity.EntityDismountEvent event) {
             handleMountChange(event.getEntity());
+            handleArmorStandMountChange(event.getDismounted());
         }
     }
 
@@ -176,11 +221,22 @@ public class BackpackCosmeticListener implements Listener {
     private void registerLegacyMountEvent(JavaPlugin plugin, Listener listener, String eventClassName) {
         try {
             Class<? extends Event> eventClass = Class.forName(eventClassName).asSubclass(Event.class);
-            Method getter = eventClass.getMethod("getEntity");
+            Method entityGetter = eventClass.getMethod("getEntity");
+            String vehicleGetterName = eventClassName.endsWith("EntityMountEvent") ? "getMount" : "getDismounted";
+            Method vehicleGetter;
+            try {
+                vehicleGetter = eventClass.getMethod(vehicleGetterName);
+            } catch (NoSuchMethodException ignored) {
+                vehicleGetter = null;
+            }
+            Method finalVehicleGetter = vehicleGetter;
             Bukkit.getPluginManager().registerEvent(eventClass, listener, EventPriority.MONITOR, (l, event) -> {
                 if (!eventClass.isInstance(event)) return;
                 try {
-                    if (getter.invoke(event) instanceof org.bukkit.entity.Entity entity) handleMountChange(entity);
+                    if (entityGetter.invoke(event) instanceof Entity entity) handleMountChange(entity);
+                    if (finalVehicleGetter != null && finalVehicleGetter.invoke(event) instanceof Entity vehicle) {
+                        handleArmorStandMountChange(vehicle);
+                    }
                 } catch (ReflectiveOperationException ignored) {
                 }
             }, plugin, true);
@@ -189,15 +245,39 @@ public class BackpackCosmeticListener implements Listener {
         }
     }
 
-    private void handleMountChange(org.bukkit.entity.Entity mounted) {
+    private void handleMountChange(Entity mounted) {
         if (!(mounted instanceof Player player)) return;
         if (!manager.hasBackpack(player)) return;
 
         scheduleBackpackMountResync(player);
     }
 
-    // Schedules two resyncs because mount/dismount packets can arrive out of order with the
-    // passenger-list updates the client uses; the second pass is a safety net for that race.
+    private void handleArmorStandMountChange(Entity vehicle) {
+        if (!(vehicle instanceof ArmorStand stand)) return;
+
+        StandDisplayData data = armorStandDisplays.get(stand.getUniqueId());
+        if (data == null) return;
+
+        SchedulerUtil.runForEntity(stand, () -> {
+            if (armorStandDisplays.get(stand.getUniqueId()) != data || !stand.isValid()) return;
+
+            int[] passengerIds = getMergedPassengerIds(stand, data.entityId);
+            int vehicleId = stand.getEntityId();
+            float yaw = stand.getYaw();
+            for (UUID viewerId : data.viewers) {
+                Player viewer = Bukkit.getPlayer(viewerId);
+                if (viewer == null) continue;
+
+                SchedulerUtil.runForEntity(viewer, () -> {
+                    if (viewer.isOnline() && data.viewers.contains(viewerId)
+                            && armorStandDisplays.get(data.standId) == data) {
+                        sendArmorStandMount(viewer, data, vehicleId, yaw, passengerIds, false);
+                    }
+                });
+            }
+        });
+    }
+
     private void scheduleBackpackMountResync(Player player) {
         manager.requestResync(player);
         SchedulerUtil.runForEntityLater(player, 1L, () -> manager.resyncBackpackMount(player));
@@ -433,5 +513,203 @@ public class BackpackCosmeticListener implements Listener {
                typeName.endsWith("_LEGGINGS") ||
                typeName.endsWith("_BOOTS") ||
                typeName.equals("ELYTRA");
+    }
+
+    void startExistingArmorStandViewerTasks() {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            startArmorStandViewerTask(player);
+        }
+    }
+
+    private void startArmorStandViewerTask(Player viewer) {
+        UUID viewerId = viewer.getUniqueId();
+        if (armorStandViewerTasks.containsKey(viewerId)) return;
+
+        SchedulerUtil.ScheduledTask task = SchedulerUtil.runForEntityTimer(viewer, 1L, 20L,
+                () -> refreshArmorStandDisplays(viewer),
+                () -> armorStandViewerTasks.remove(viewerId));
+        if (task == null) return;
+
+        SchedulerUtil.ScheduledTask previous = armorStandViewerTasks.putIfAbsent(viewerId, task);
+        if (previous == null) {
+            MechanicsManager.registerTask(factory.getMechanicID(), task);
+        } else {
+            task.cancel();
+        }
+    }
+
+    private void refreshArmorStandDisplays(Player viewer) {
+        if (!viewer.isOnline()) return;
+
+        Set<UUID> nearbyStandIds = new HashSet<>();
+        for (Entity entity : viewer.getNearbyEntities(
+                armorStandScanDistance, armorStandScanDistance, armorStandScanDistance)) {
+            if (entity instanceof ArmorStand stand) {
+                nearbyStandIds.add(stand.getUniqueId());
+                refreshArmorStandForViewer(viewer, stand);
+            }
+        }
+
+        for (StandDisplayData data : armorStandDisplays.values()) {
+            if (!nearbyStandIds.contains(data.standId)) {
+                removeArmorStandViewer(viewer, data);
+            }
+        }
+    }
+
+    private void refreshArmorStandForViewer(Player viewer, ArmorStand stand) {
+        SchedulerUtil.runForEntity(stand, () -> {
+            if (!stand.isValid()) {
+                removeArmorStandDisplay(stand.getUniqueId());
+                return;
+            }
+
+            ItemStack chestItem = stand.getEquipment() == null ? null : stand.getEquipment().getChestplate();
+            BackpackCosmeticMechanic mechanic = getBackpackMechanic(chestItem);
+            if (mechanic == null) {
+                removeArmorStandDisplay(stand.getUniqueId());
+                return;
+            }
+
+            StandDisplayData data = ensureArmorStandDisplay(stand, mechanic, chestItem);
+            Location location = stand.getLocation().clone();
+            int vehicleId = stand.getEntityId();
+            float yaw = stand.getYaw();
+            int[] passengerIds = getMergedPassengerIds(stand, data.entityId);
+
+            SchedulerUtil.runForEntity(viewer, () -> updateArmorStandViewer(
+                    viewer, data, location, vehicleId, yaw, passengerIds));
+        }, () -> removeArmorStandDisplay(stand.getUniqueId()));
+    }
+
+    private StandDisplayData ensureArmorStandDisplay(ArmorStand stand,
+                                                       BackpackCosmeticMechanic mechanic,
+                                                       ItemStack displayItem) {
+        UUID standId = stand.getUniqueId();
+        StandDisplayData data = armorStandDisplays.get(standId);
+        if (data != null && data.mechanic == mechanic && displayItem.isSimilar(data.displayItem)) {
+            return data;
+        }
+
+        removeArmorStandDisplay(standId);
+        data = new StandDisplayData(standId, NMSHandlers.getHandler().getNextEntityId(), mechanic,
+                displayItem.clone());
+        armorStandDisplays.put(standId, data);
+        return data;
+    }
+
+    private void updateArmorStandViewer(Player viewer, StandDisplayData data, Location standLocation,
+                                        int vehicleId, float yaw, int[] passengerIds) {
+        if (!viewer.isOnline() || armorStandDisplays.get(data.standId) != data) return;
+
+        boolean inRange = viewer.getWorld().equals(standLocation.getWorld())
+                && viewer.getLocation().distanceSquared(standLocation)
+                <= (double) data.mechanic.getViewDistance() * data.mechanic.getViewDistance();
+        if (!inRange) {
+            removeArmorStandViewer(viewer, data);
+            return;
+        }
+
+        boolean spawned = data.viewers.add(viewer.getUniqueId());
+        if (spawned) {
+            NMSHandlers.getHandler().spawnBackpackArmorStand(
+                    viewer, data.entityId, standLocation, data.displayItem, data.mechanic.isSmallArmorStand());
+        }
+
+        sendArmorStandMount(viewer, data, vehicleId, yaw, passengerIds, spawned);
+    }
+
+    private void sendArmorStandMount(Player viewer, StandDisplayData data, int vehicleId,
+                                     float yaw, int[] passengerIds, boolean resync) {
+        NMSHandlers.getHandler().sendMountPacket(viewer, vehicleId, passengerIds);
+        NMSHandlers.getHandler().sendEntityHeadRotation(viewer, data.entityId, yaw);
+
+        if (resync) {
+            SchedulerUtil.runForEntityLater(viewer, 1L, () -> {
+                if (viewer.isOnline() && data.viewers.contains(viewer.getUniqueId())
+                        && armorStandDisplays.get(data.standId) == data) {
+                    NMSHandlers.getHandler().sendMountPacket(viewer, vehicleId, passengerIds);
+                }
+            });
+        }
+    }
+
+    private int[] getMergedPassengerIds(ArmorStand stand, int displayEntityId) {
+        Set<Integer> passengerIds = new LinkedHashSet<>();
+        for (Entity passenger : stand.getPassengers()) {
+            passengerIds.add(passenger.getEntityId());
+        }
+        passengerIds.add(displayEntityId);
+        return passengerIds.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private void removeArmorStandViewer(Player viewer, StandDisplayData data) {
+        if (data.viewers.remove(viewer.getUniqueId())) {
+            NMSHandlers.getHandler().sendEntityDestroy(viewer, data.entityId);
+            if (data.viewers.isEmpty()) {
+                armorStandDisplays.remove(data.standId, data);
+            }
+        }
+    }
+
+    private void checkArmorStandDisplay(ArmorStand stand) {
+        if (!stand.isValid()) {
+            removeArmorStandDisplay(stand.getUniqueId());
+            return;
+        }
+
+        ItemStack chestItem = stand.getEquipment() == null ? null : stand.getEquipment().getChestplate();
+        BackpackCosmeticMechanic mechanic = getBackpackMechanic(chestItem);
+        if (mechanic == null) {
+            removeArmorStandDisplay(stand.getUniqueId());
+            return;
+        }
+
+        ensureArmorStandDisplay(stand, mechanic, chestItem);
+    }
+
+    private void removeArmorStandDisplay(UUID standId) {
+        StandDisplayData data = armorStandDisplays.remove(standId);
+        if (data == null) return;
+        destroyArmorStandDisplay(data);
+    }
+
+    private void destroyArmorStandDisplay(StandDisplayData data) {
+        for (UUID viewerId : data.viewers) {
+            Player viewer = Bukkit.getPlayer(viewerId);
+            if (viewer == null) continue;
+
+            SchedulerUtil.runForEntity(viewer,
+                    () -> NMSHandlers.getHandler().sendEntityDestroy(viewer, data.entityId));
+        }
+        data.viewers.clear();
+    }
+
+    void cleanupArmorStandDisplays() {
+        for (SchedulerUtil.ScheduledTask task : armorStandViewerTasks.values()) {
+            task.cancel();
+        }
+        armorStandViewerTasks.clear();
+
+        for (StandDisplayData data : armorStandDisplays.values()) {
+            destroyArmorStandDisplay(data);
+        }
+        armorStandDisplays.clear();
+    }
+
+    private static final class StandDisplayData {
+        private final UUID standId;
+        private final int entityId;
+        private final BackpackCosmeticMechanic mechanic;
+        private final ItemStack displayItem;
+        private final Set<UUID> viewers = ConcurrentHashMap.newKeySet();
+
+        private StandDisplayData(UUID standId, int entityId, BackpackCosmeticMechanic mechanic,
+                                 ItemStack displayItem) {
+            this.standId = standId;
+            this.entityId = entityId;
+            this.mechanic = mechanic;
+            this.displayItem = displayItem;
+        }
     }
 }
